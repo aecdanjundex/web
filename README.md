@@ -33,7 +33,7 @@ r.run(":8080")
 
 ## Instalação
 
-Precisa da Caju 0.2.0 ou mais nova (que traz o `std/json`).
+Precisa da Caju 0.3.0 ou mais nova (std/json e o servidor HTTP com keep-alive).
 
 ```sh
 caju pkg init                          # se o projeto ainda não tem caju.toml

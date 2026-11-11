@@ -1,6 +1,6 @@
 [package]
 name = "github.com/aecdanjundex/web"
-version = "0.1.0"
+version = "0.2.0"
 description = "A small Gin-style web framework for REST APIs"
 license = "MIT"
 authors = ["Aécio"]
