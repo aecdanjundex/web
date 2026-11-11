@@ -5,4 +5,4 @@ description = "A small Gin-style web framework for REST APIs"
 license = "MIT"
 authors = ["Aécio"]
 entry = "web.caju"
-caju = "0.2.0"
+caju = "0.3.0"

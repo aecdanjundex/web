@@ -98,6 +98,13 @@ describe("the request", fn() {
     res := web.test_request(r, "POST", "/echo", "hi", map[str]str{"X-Token": "t1", "X-Forwarded-For": "10.0.0.1, 10.0.0.2"})
     expect(res.body).to_equal("POST /echo t1 hi 10.0.0.1")
   })
+  it("gives the address of the connection when no proxy header says otherwise", fn() {
+    r := web.new()
+    r.get("/ip", fn(c: *web.Context) { c.string(200, c.client_ip()) })
+    expect(web.test_request(r, "GET", "/ip", "", nil).body).to_equal("192.0.2.1")
+    res := web.test_request(r, "GET", "/ip", "", map[str]str{"X-Real-Ip": "10.9.9.9"})
+    expect(res.body).to_equal("10.9.9.9")
+  })
 })
 
 describe("the response", fn() {

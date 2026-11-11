@@ -289,8 +289,14 @@ export fn (e: *Engine) serve(req: *http.Request, res: *http.Response) {
   c.next()
 }
 
-# listens on addr ("host:port" or ":port"; "" is ":8080") and serves forever; returns only on error
-export fn (e: *Engine) run(addr: str) -> error {
+# listens on addr ("host:port" or ":port"; "" is ":8080") and serves forever; returns only on error.
+# One process with an event loop: many connections at once, kept alive between requests.
+export fn (e: *Engine) run(addr: str) -> error { return e.run_workers(addr, 1) }
+
+# like run, in n processes that share the port (n <= 0: one per CPU). The processes do NOT share
+# memory: globals changed by handlers (an in-memory list...) differ in each process. Use it for
+# stateless handlers or with the state kept elsewhere (a database, files...).
+export fn (e: *Engine) run_workers(addr: str, n: int) -> error {
   if addr == "" { addr = ":8080" }
   i := strings.last_index(addr, ":")
   host := "0.0.0.0"
@@ -304,8 +310,12 @@ export fn (e: *Engine) run(addr: str) -> error {
   http.handle("/", fn(req: *http.Request, res: *http.Response) { e.serve(req, res) })
   shown := host
   if shown == "0.0.0.0" { shown = "localhost" }
-  os.stdout("[WEB] listening on http://" + shown + ":" + str(port) + "\n")
-  return http.listen_and_serve(host, port)
+  if n == 1 {
+    os.stdout("[WEB] listening on http://" + shown + ":" + str(port) + "\n")
+    return http.listen_and_serve(host, port)
+  }
+  if n <= 0 { os.stdout("[WEB] listening on http://" + shown + ":" + str(port) + " (one process per CPU)\n") } else { os.stdout("[WEB] listening on http://" + shown + ":" + str(port) + " (" + str(n) + " processes)\n") }
+  return http.listen_and_serve_workers(host, port, n)
 }
 
 # ---------------------------------------------------------------- testing without a network
@@ -324,7 +334,7 @@ export fn (r: *TestResponse) header(name: str) -> str {
 
 # runs one request through the engine, without sockets: target is a path with an optional query
 export fn test_request(e: *Engine, method: str, target: str, body: str, headers: map[str]str) -> *TestResponse {
-  req := &http.Request{method: method, version: "HTTP/1.1", headers: map[str]str{}, body: body}
+  req := &http.Request{method: method, version: "HTTP/1.1", headers: map[str]str{}, body: body, remote_addr: "192.0.2.1:41000"}
   q := strings.index(target, "?")
   if q >= 0 {
     req.path = target[0:q]
@@ -424,7 +434,13 @@ export fn (c: *Context) client_ip() -> str {
     if comma >= 0 { f = f[0:comma] }
     return strings.trim_space(f)
   }
-  return strings.trim_space(c.header("X-Real-Ip"))
+  real := strings.trim_space(c.header("X-Real-Ip"))
+  if real != "" { return real }
+  # the address of the connection, without the port
+  a := c.request.remote_addr
+  colon := strings.last_index(a, ":")
+  if colon >= 0 { return a[0:colon] }
+  return a
 }
 
 # per-request values shared between middlewares and handlers

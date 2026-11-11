@@ -59,7 +59,8 @@ Exemplo completo, uma API de tarefas (CRUD em memória): [`examples/todo_api.caj
 | `g := r.group("/api")`, `g.group("/v1")`, `g.use(mw)` | grupos aninhados, com os mesmos métodos de rota |
 | `r.no_route(h)`, `r.no_method(h)` | handlers de 404 e 405 |
 | `r.redirect_trailing_slash`, `r.handle_method_not_allowed` | opções (ambas `true` por padrão) |
-| `r.run(":8080")` / `r.run("127.0.0.1:8080")` | serve para sempre; devolve `error` só se falhar |
+| `r.run(":8080")` / `r.run("127.0.0.1:8080")` | serve para sempre num processo; devolve `error` só se falhar |
+| `r.run_workers(":8080", n)` | o mesmo em `n` processos que dividem a porta (`n <= 0`: um por CPU); **cada processo tem sua própria memória** |
 | `r.serve(req, res)` | atende um `*http.Request` do `std/http` |
 | `web.test_request(r, method, target, body, headers)` | roda uma requisição sem rede e devolve `*web.TestResponse` (`status`, `headers`, `body`, `header(name)`) |
 
@@ -86,7 +87,7 @@ a rota também vale para ela.
 | `c.param("id")` | parâmetro da rota |
 | `c.query("q")`, `c.default_query("page", "1")`, `c.get_query("q")` → `(str, bool)`, `c.query_array("tag")` | query string, decodificada |
 | `c.header("X-Token")`, `c.method()`, `c.path()`, `c.full_path()` (o padrão: `/users/:id`), `c.body()` | |
-| `c.client_ip()` | de `X-Forwarded-For` ou `X-Real-Ip` |
+| `c.client_ip()` | de `X-Forwarded-For`, `X-Real-Ip` ou, sem eles, o endereço da conexão |
 | `c.bind(&v)` | lê o corpo JSON em `v`; com erro, responde 400 `{"error": ...}`, aborta e devolve o erro |
 | `c.should_bind_json(&v)` | o mesmo sem responder: o handler decide |
 
@@ -133,13 +134,14 @@ Para rodar os testes do próprio pacote: `caju test`.
 
 ## Diferenças em relação ao Gin
 
-- O servidor do `std/http` atende **uma conexão por vez**, sem goroutines, e fecha a conexão a
-  cada resposta (`Connection: close`, sem keep-alive). Serve para APIs pequenas e ferramentas
-  internas. Um handler lento segura os outros clientes.
+- O servidor do `std/http` é um laço de eventos (epoll) num processo: mantém muitas conexões
+  abertas ao mesmo tempo, com keep-alive e pipelining, mas **roda um handler por vez** (não há
+  goroutines). Um handler lento segura os outros clientes daquele processo.
+- Para usar vários núcleos, `r.run_workers(addr, n)` sobe `n` processos na mesma porta
+  (`SO_REUSEPORT`). Eles **não compartilham memória**: um mapa global alterado por um handler
+  existe separado em cada processo. Use com handlers sem estado ou com o estado fora do processo.
 - Sem parâmetros variádicos: middlewares de rota vão numa lista, em `r.route(...)`.
 - `web.default_engine()` no lugar de `Default()`, e `map[str]any` no lugar de `gin.H`.
-- `c.client_ip()` só conhece os cabeçalhos de proxy: o `std/http` ainda não expõe o endereço da
-  conexão.
 - Sem templates HTML, upload multipart, formulários (`c.post_form`), arquivos estáticos nem HTTPS.
 
 ## Licença
