@@ -33,10 +33,17 @@ struct Route {
   pattern: str
   handlers: []fn(*Context)
   group: *Group
+  chain: []fn(*Context)       # middlewares of the groups + handlers, built when chain_gen changes
+  chain_gen: int
 }
+
+# bumped by every use() and route: a route rebuilds its cached chain when this differs
+let chain_gen: int = 1
 
 struct Node {
   static: map[str]*Node
+  skeys: []str                # the static children again, as lists (matched against the path bytes)
+  snodes: []*Node
   param: *Node
   param_name: str
   wild: *Node
@@ -83,6 +90,8 @@ fn (n: *Node) insert(method: str, pattern: str, rt: *Route) {
       if !ok {
         next = new_node()
         cur.static[s] = next
+        cur.skeys = append(cur.skeys, s)
+        cur.snodes = append(cur.snodes, next)
       }
       cur = next
     }
@@ -101,26 +110,49 @@ fn (n: *Node) accepts(method: str) -> bool {
   return false
 }
 
-# the node for segs[i:] that accepts method, filling params; static, then :param, then *catch-all
-fn (n: *Node) find(segs: []str, i: int, params: map[str]str, method: str) -> *Node {
-  if i == len(segs) {
+# does p[a:b] equal k?
+fn seg_is(p: str, a: int, b: int, k: str) -> bool {
+  if b - a != len(k) { return false }
+  for i := 0; i < len(k); i++ { if p[a + i] != k[i] { return false } }
+  return true
+}
+
+# where the segments of a path start: -1 for none ("" and "/"), else after the leading "/"
+fn path_start(p: str) -> int {
+  if p == "" || p == "/" { return -1 }
+  if p[0] == 47 { return 1 }
+  return 0
+}
+
+# the node for the path p from the segment starting at a (-1: no segments left) that accepts
+# method, filling c.params; static, then :param, then *catch-all
+fn (n: *Node) find(p: str, a: int, c: *Context, method: str) -> *Node {
+  if a < 0 {
     if n.accepts(method) { return n }
     return nil
   }
-  s := segs[i]
-  if child, ok := n.static[s]; ok {
-    r := child.find(segs, i + 1, params, method)
-    if r != nil { return r }
+  b := a
+  while b < len(p) && p[b] != 47 { b++ }
+  next := -1
+  if b < len(p) { next = b + 1 }
+  for j := 0; j < len(n.skeys); j++ {
+    if seg_is(p, a, b, n.skeys[j]) {
+      r := n.snodes[j].find(p, next, c, method)
+      if r != nil { return r }
+      break
+    }
   }
-  if n.param != nil && s != "" {
-    r2 := n.param.find(segs, i + 1, params, method)
+  if n.param != nil && b > a {
+    r2 := n.param.find(p, next, c, method)
     if r2 != nil {
-      params[n.param_name] = path_unescape(s)
+      if c.params == nil { c.params = map[str]str{} }
+      c.params[n.param_name] = path_unescape(p[a:b])
       return r2
     }
   }
   if n.wild != nil && n.wild.accepts(method) {
-    params[n.wild_name] = "/" + path_unescape(strings.join(segs[i:], "/"))
+    if c.params == nil { c.params = map[str]str{} }
+    c.params[n.wild_name] = "/" + path_unescape(p[a:])
     return n.wild
   }
   return nil
@@ -178,7 +210,10 @@ fn join_paths(a: str, b: str) -> str {
 }
 
 # adds a middleware to the group (on the engine: to every request, 404 and 405 included)
-export fn (g: *Group) use(mw: fn(*Context)) { g.middlewares = append(g.middlewares, mw) }
+export fn (g: *Group) use(mw: fn(*Context)) {
+  g.middlewares = append(g.middlewares, mw)
+  chain_gen++
+}
 
 # a group under prefix, inside this one
 export fn (g: *Group) group(prefix: str) -> *Group {
@@ -191,6 +226,7 @@ export fn (g: *Group) route(method: str, path: str, handlers: []fn(*Context)) {
   full := join_paths(g.prefix, path)
   if !strings.has_prefix(full, "/") { full = "/" + full }
   g.engine.tree.insert(strings.to_upper(method), full, &Route{pattern: full, handlers: handlers, group: g})
+  chain_gen++
 }
 
 export fn (g: *Group) handle(method: str, path: str, h: fn(*Context)) { g.route(method, path, []fn(*Context){h}) }
@@ -241,24 +277,27 @@ fn sort_strs(a: []str) {
 
 # answers one request (std/http calls this through run(); tests call it through test_request())
 export fn (e: *Engine) serve(req: *http.Request, res: *http.Response) {
-  c := &Context{request: req, response: res, params: map[str]str{}, keys: map[str]any{}, index: -1, engine: e}
-  segs := split_path(req.path)
-  n := e.tree.find(segs, 0, c.params, req.method)
+  c := &Context{request: req, response: res, index: -1, engine: e}
+  n := e.tree.find(req.path, path_start(req.path), c, req.method)
   if n != nil {
     rt := n.route_for(req.method)
     c.full = rt.pattern
-    hs := chain_of(rt.group, []fn(*Context){})
-    for _, h := range rt.handlers { hs = append(hs, h) }
-    c.handlers = hs
+    if rt.chain_gen != chain_gen {
+      hs := chain_of(rt.group, []fn(*Context){})
+      for _, h := range rt.handlers { hs = append(hs, h) }
+      rt.chain = hs
+      rt.chain_gen = chain_gen
+    }
+    c.handlers = rt.chain
     c.next()
     return
   }
-  c.params = map[str]str{}
+  c.params = nil
   if e.redirect_trailing_slash && req.path != "/" {
     alt := req.path + "/"
     if strings.has_suffix(req.path, "/") { alt = strings.trim_suffix(req.path, "/") }
     if alt == "" { alt = "/" }
-    if e.tree.find(split_path(alt), 0, map[str]str{}, req.method) != nil {
+    if e.tree.find(alt, path_start(alt), &Context{}, req.method) != nil {
       code := 307
       if req.method == "GET" || req.method == "HEAD" { code = 301 }
       if req.query != "" { alt = alt + "?" + req.query }
@@ -267,7 +306,7 @@ export fn (e: *Engine) serve(req: *http.Request, res: *http.Response) {
     }
   }
   if e.handle_method_not_allowed {
-    other := e.tree.find(segs, 0, map[str]str{}, "")
+    other := e.tree.find(req.path, path_start(req.path), &Context{}, "")
     if other != nil {
       allow := []str{}
       for m, _ := range other.routes { allow = append(allow, m) }
@@ -444,7 +483,10 @@ export fn (c: *Context) client_ip() -> str {
 }
 
 # per-request values shared between middlewares and handlers
-export fn (c: *Context) set(key: str, v: any) { c.keys[key] = v }
+export fn (c: *Context) set(key: str, v: any) {
+  if c.keys == nil { c.keys = map[str]any{} }
+  c.keys[key] = v
+}
 export fn (c: *Context) get(key: str) -> (any, bool) {
   v, ok := c.keys[key]
   return v, ok
