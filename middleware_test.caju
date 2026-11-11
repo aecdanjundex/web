@@ -1,0 +1,62 @@
+import { describe, it, expect } from "std/testing"
+import "web"
+import "std/strings"
+import "std/base64"
+
+describe("recovery", fn() {
+  it("turns a panic into 500 JSON and keeps serving", fn() {
+    r := web.new()
+    r.use(web.recovery())
+    r.get("/boom", fn(c: *web.Context) {
+      c.string(200, "half")
+      panic("broken")
+    })
+    r.get("/ok", fn(c: *web.Context) { c.string(200, "fine") })
+    res := web.test_request(r, "GET", "/boom", "", nil)
+    expect(res.status).to_equal(500)
+    expect(res.body).to_equal("{\"error\":\"internal server error\"}")
+    expect(web.test_request(r, "GET", "/ok", "", nil).body).to_equal("fine")
+  })
+})
+
+describe("logger", fn() {
+  it("writes one line per request with status, method and path", fn() {
+    lines := []str{}
+    r := web.new()
+    r.use(web.logger_to(fn(line: str) { lines = append(lines, line) }))
+    r.get("/users/:id", fn(c: *web.Context) { c.string(200, "u") })
+    web.test_request(r, "GET", "/users/5?full=1", "", nil)
+    web.test_request(r, "GET", "/missing", "", nil)
+    expect(len(lines)).to_equal(2)
+    expect(lines[0]).to_start_with("[WEB] 200 | ")
+    expect(lines[0]).to_end_with("GET \"/users/5?full=1\"")
+    expect(lines[1]).to_start_with("[WEB] 404 | ")
+  })
+})
+
+describe("cors", fn() {
+  it("adds the headers and answers preflight requests with 204", fn() {
+    r := web.new()
+    r.use(web.cors("*"))
+    r.get("/x", fn(c: *web.Context) { c.string(200, "x") })
+    res := web.test_request(r, "GET", "/x", "", nil)
+    expect(res.header("Access-Control-Allow-Origin")).to_equal("*")
+    pre := web.test_request(r, "OPTIONS", "/x", "", nil)
+    expect(pre.status).to_equal(204)
+    expect(strings.index(pre.header("Access-Control-Allow-Methods"), "DELETE") >= 0).to_be_true()
+  })
+})
+
+describe("basic_auth", fn() {
+  it("lets known users in and refuses the others with 401", fn() {
+    r := web.new()
+    r.use(web.basic_auth(map[str]str{"ana": "s3cret"}))
+    r.get("/me", fn(c: *web.Context) { c.string(200, c.must_get("user").(str)) })
+    ok := web.test_request(r, "GET", "/me", "", map[str]str{"Authorization": "Basic " + base64.encode("ana:s3cret")})
+    expect(ok.body).to_equal("ana")
+    bad := web.test_request(r, "GET", "/me", "", map[str]str{"Authorization": "Basic " + base64.encode("ana:wrong")})
+    expect(bad.status).to_equal(401)
+    expect(bad.header("WWW-Authenticate")).to_start_with("Basic")
+    expect(web.test_request(r, "GET", "/me", "", nil).status).to_equal(401)
+  })
+})

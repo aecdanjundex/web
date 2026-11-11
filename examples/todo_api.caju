@@ -1,0 +1,125 @@
+# A REST API for a to-do list, kept in memory.
+#
+#   caju run examples/todo_api.caju            (listens on :8080; PORT=3000 to change)
+#
+#   curl localhost:8080/todos
+#   curl -X POST localhost:8080/todos -d '{"title": "buy milk"}'
+#   curl localhost:8080/todos/1
+#   curl -X PUT localhost:8080/todos/1 -d '{"title": "buy milk", "done": true}'
+#   curl -X DELETE localhost:8080/todos/1
+#
+# In a project that installed the package (caju pkg add github.com/aecdanjundex/web), import it
+# as "github.com/aecdanjundex/web"; this example imports the copy next to it.
+import "../web"
+import "std/os"
+import "std/strconv"
+import "std/strings"
+
+struct Todo {
+  id: int
+  title: str
+  done: bool
+}
+
+# what a client sends on POST and PUT
+struct TodoInput {
+  title: str
+  done: bool
+}
+
+let todos = map[int]*Todo{}
+let order = []int{}
+let next_id: int = 1
+
+fn all_todos() -> []Todo {
+  out := []Todo{}
+  for _, id := range order { out = append(out, *todos[id]) }
+  return out
+}
+
+fn remove_id(id: int) {
+  kept := []int{}
+  for _, x := range order { if x != id { kept = append(kept, x) } }
+  order = kept
+}
+
+# the :id of the path, or nil after answering 400/404
+fn find_todo(c: *web.Context) -> *Todo {
+  id, err := strconv.atoi(c.param("id"))
+  if err != nil {
+    c.json(400, map[str]any{"error": "id must be a number"})
+    return nil
+  }
+  t, ok := todos[id]
+  if !ok {
+    c.json(404, map[str]any{"error": "todo " + str(id) + " not found"})
+    return nil
+  }
+  return t
+}
+
+# reads and checks the body; nil after answering 400
+fn read_input(c: *web.Context) -> *TodoInput {
+  in := &TodoInput{}
+  if c.bind(in) != nil { return nil }
+  in.title = strings.trim_space(in.title)
+  if in.title == "" {
+    c.json(400, map[str]any{"error": "title is required"})
+    return nil
+  }
+  return in
+}
+
+r := web.default_engine()
+
+r.get("/health", fn(c: *web.Context) { c.json(200, map[str]any{"status": "ok"}) })
+
+api := r.group("/todos")
+api.get("", fn(c: *web.Context) {
+  list := all_todos()
+  if c.query("done") != "" {
+    want := c.query("done") == "true"
+    filtered := []Todo{}
+    for _, t := range list { if t.done == want { filtered = append(filtered, t) } }
+    list = filtered
+  }
+  c.json(200, list)
+})
+api.post("", fn(c: *web.Context) {
+  in := read_input(c)
+  if in == nil { return }
+  t := &Todo{id: next_id, title: in.title, done: in.done}
+  next_id++
+  todos[t.id] = t
+  order = append(order, t.id)
+  c.set_header("Location", "/todos/" + str(t.id))
+  c.json(201, *t)
+})
+api.get("/:id", fn(c: *web.Context) {
+  t := find_todo(c)
+  if t != nil { c.json(200, *t) }
+})
+api.put("/:id", fn(c: *web.Context) {
+  t := find_todo(c)
+  if t == nil { return }
+  in := read_input(c)
+  if in == nil { return }
+  t.title = in.title
+  t.done = in.done
+  c.json(200, *t)
+})
+api.delete("/:id", fn(c: *web.Context) {
+  t := find_todo(c)
+  if t == nil { return }
+  delete(todos, t.id)
+  remove_id(t.id)
+  c.status(204)
+})
+
+port := os.getenv("PORT")
+if port == "" { port = "8080" }
+err := r.run(":" + port)
+if err != nil {
+  os.eprintln(err.Error())
+  os.exit(1)
+}

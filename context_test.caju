@@ -1,0 +1,122 @@
+import { describe, it, expect } from "std/testing"
+import "web"
+import "std/strings"
+
+fn get(r: *web.Engine, target: str) -> *web.TestResponse { return web.test_request(r, "GET", target, "", nil) }
+
+fn mark(log: *[]str, name: str) -> fn(*web.Context) {
+  return fn(c: *web.Context) {
+    *log = append(*log, name + ">")
+    c.next()
+    *log = append(*log, "<" + name)
+  }
+}
+
+describe("middlewares", fn() {
+  it("run engine, group and route handlers in order, around next()", fn() {
+    log := []str{}
+    r := web.new()
+    r.use(mark(&log, "engine"))
+    g := r.group("/g")
+    g.use(mark(&log, "group"))
+    g.route("GET", "/x", []fn(*web.Context){mark(&log, "route"), fn(c: *web.Context) {
+      log = append(log, "handler")
+      c.string(200, "ok")
+    }})
+    expect(get(r, "/g/x").body).to_equal("ok")
+    expect(strings.join(log, " ")).to_equal("engine> group> route> handler <route <group <engine")
+  })
+  it("apply a use() made after the route", fn() {
+    r := web.new()
+    r.get("/x", fn(c: *web.Context) { c.string(200, "x") })
+    r.use(fn(c: *web.Context) {
+      c.set_header("X-Late", "yes")
+      c.next()
+    })
+    expect(get(r, "/x").header("X-Late")).to_equal("yes")
+  })
+  it("run without an explicit next() too", fn() {
+    r := web.new()
+    r.use(fn(c: *web.Context) { c.set_header("X-A", "1") })
+    r.get("/x", fn(c: *web.Context) { c.string(200, "x") })
+    res := get(r, "/x")
+    expect(res.header("X-A")).to_equal("1")
+    expect(res.body).to_equal("x")
+  })
+  it("stop the chain with abort()", fn() {
+    ran := false
+    r := web.new()
+    r.use(fn(c: *web.Context) {
+      c.abort_with_status(403)
+      expect(c.is_aborted()).to_be_true()
+    })
+    r.get("/x", fn(c: *web.Context) { ran = true })
+    expect(get(r, "/x").status).to_equal(403)
+    expect(ran).to_be_false()
+  })
+  it("run on 404 and 405 answers too", fn() {
+    r := web.new()
+    r.use(fn(c: *web.Context) {
+      c.set_header("X-Seen", "1")
+      c.next()
+    })
+    r.get("/a", fn(c: *web.Context) { c.string(200, "a") })
+    expect(get(r, "/zzz").header("X-Seen")).to_equal("1")
+    expect(web.test_request(r, "POST", "/a", "", nil).header("X-Seen")).to_equal("1")
+  })
+  it("share values with set/get/must_get", fn() {
+    r := web.new()
+    r.use(fn(c: *web.Context) {
+      c.set("user", "ana")
+      c.next()
+    })
+    r.get("/me", fn(c: *web.Context) {
+      v, ok := c.get("user")
+      _, missing := c.get("nope")
+      name := c.must_get("user").(str)
+      c.string(200, v.(str) + " " + str(ok) + " " + str(missing) + " " + name)
+    })
+    expect(get(r, "/me").body).to_equal("ana true false ana")
+  })
+})
+
+describe("the request", fn() {
+  it("reads query parameters, decoded, with defaults and repeats", fn() {
+    r := web.new()
+    r.get("/s", fn(c: *web.Context) {
+      _, has := c.get_query("missing")
+      c.string(200, c.query("q") + "|" + c.default_query("page", "1") + "|" + strings.join(c.query_array("tag"), ",") + "|" + str(has))
+    })
+    expect(get(r, "/s?q=caju+web%21&tag=a&tag=b").body).to_equal("caju web!|1|a,b|false")
+    expect(get(r, "/s?page=3").body).to_equal("|3||false")
+  })
+  it("reads headers, method, path, body and the client address", fn() {
+    r := web.new()
+    r.post("/echo", fn(c: *web.Context) {
+      c.string(200, c.method() + " " + c.path() + " " + c.header("x-token") + " " + c.body() + " " + c.client_ip())
+    })
+    res := web.test_request(r, "POST", "/echo", "hi", map[str]str{"X-Token": "t1", "X-Forwarded-For": "10.0.0.1, 10.0.0.2"})
+    expect(res.body).to_equal("POST /echo t1 hi 10.0.0.1")
+  })
+})
+
+describe("the response", fn() {
+  it("writes text, status, headers, raw data and redirects", fn() {
+    r := web.new()
+    r.get("/t", fn(c: *web.Context) {
+      c.set_header("X-Id", "7")
+      c.string(201, "made")
+    })
+    r.get("/d", fn(c: *web.Context) { c.data(200, "text/csv", "a,b\n") })
+    r.get("/r", fn(c: *web.Context) { c.redirect(302, "/t") })
+    r.delete("/n", fn(c: *web.Context) { c.status(204) })
+    res := get(r, "/t")
+    expect(res.status).to_equal(201)
+    expect(res.body).to_equal("made")
+    expect(res.header("X-Id")).to_equal("7")
+    expect(res.header("Content-Type")).to_equal("text/plain; charset=utf-8")
+    expect(get(r, "/d").header("Content-Type")).to_equal("text/csv")
+    expect(get(r, "/r").header("Location")).to_equal("/t")
+    expect(web.test_request(r, "DELETE", "/n", "", nil).status).to_equal(204)
+  })
+})

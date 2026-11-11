@@ -1,0 +1,646 @@
+# web: a small Gin-style web framework for Caju, on top of std/http.
+#
+#   import "github.com/aecdanjundex/web"
+#
+#   r := web.default_engine()            # with web.logger() and web.recovery()
+#   r.get("/users/:id", fn(c: *web.Context) {
+#     c.json(200, map[str]any{"id": c.param("id")})
+#   })
+#   api := r.group("/api")
+#   api.use(auth)
+#   api.post("/items", create_item)
+#   r.run(":8080")
+#
+# Routes: static segments ("/users/new") win over parameters ("/users/:id"), which win over a
+# catch-all at the end ("/files/*path"). Middlewares run in this order: the engine's (r.use), then
+# those of each group from the outermost in, then the route's own handlers (r.route). They are
+# looked up on every request, so a use() after a route still applies to it.
+
+import "std/http"
+import "std/strings"
+import "std/strconv"
+import "std/os"
+import "std/base64"
+import "std/json"
+
+export const VERSION = "0.1.0"
+
+const ABORT_INDEX = 1 << 40
+
+# ---------------------------------------------------------------- the router
+
+struct Route {
+  pattern: str
+  handlers: []fn(*Context)
+  group: *Group
+}
+
+struct Node {
+  static: map[str]*Node
+  param: *Node
+  param_name: str
+  wild: *Node
+  wild_name: str
+  routes: map[str]*Route      # method -> route
+}
+
+fn new_node() -> *Node { return &Node{static: map[str]*Node{}, routes: map[str]*Route{}} }
+
+# the segments of a path: "/" -> [], "/a/b" -> ["a", "b"], "/a/" -> ["a", ""]
+fn split_path(p: str) -> []str {
+  if p == "" || p == "/" { return []str{} }
+  if strings.has_prefix(p, "/") { p = p[1:] }
+  return strings.split(p, "/")
+}
+
+fn (n: *Node) insert(method: str, pattern: str, rt: *Route) {
+  segs := split_path(pattern)
+  cur := n
+  for i, s := range segs {
+    if strings.has_prefix(s, ":") {
+      name := s[1:]
+      if name == "" { panic("web: parameter without a name in " + pattern) }
+      if cur.param == nil {
+        cur.param = new_node()
+        cur.param_name = name
+      } else if cur.param_name != name {
+        panic("web: " + pattern + " names the parameter :" + name + " where another route already uses :" + cur.param_name)
+      }
+      cur = cur.param
+    } else if strings.has_prefix(s, "*") {
+      wname := s[1:]
+      if wname == "" { panic("web: catch-all without a name in " + pattern) }
+      if i != len(segs) - 1 { panic("web: the catch-all *" + wname + " must be the last segment of " + pattern) }
+      if cur.wild == nil {
+        cur.wild = new_node()
+        cur.wild_name = wname
+      } else if cur.wild_name != wname {
+        panic("web: " + pattern + " names the catch-all *" + wname + " where another route already uses *" + cur.wild_name)
+      }
+      cur = cur.wild
+    } else {
+      next, ok := cur.static[s]
+      if !ok {
+        next = new_node()
+        cur.static[s] = next
+      }
+      cur = next
+    }
+  }
+  if _, dup := cur.routes[method]; dup { panic("web: route " + method + " " + pattern + " registered twice") }
+  cur.routes[method] = rt
+}
+
+# whether a node answers a method ("" = any method; HEAD falls back to GET)
+fn (n: *Node) accepts(method: str) -> bool {
+  if method == "" { return len(n.routes) > 0 }
+  if _, ok := n.routes[method]; ok { return true }
+  if method == "HEAD" {
+    if _, ok2 := n.routes["GET"]; ok2 { return true }
+  }
+  return false
+}
+
+# the node for segs[i:] that accepts method, filling params; static, then :param, then *catch-all
+fn (n: *Node) find(segs: []str, i: int, params: map[str]str, method: str) -> *Node {
+  if i == len(segs) {
+    if n.accepts(method) { return n }
+    return nil
+  }
+  s := segs[i]
+  if child, ok := n.static[s]; ok {
+    r := child.find(segs, i + 1, params, method)
+    if r != nil { return r }
+  }
+  if n.param != nil && s != "" {
+    r2 := n.param.find(segs, i + 1, params, method)
+    if r2 != nil {
+      params[n.param_name] = path_unescape(s)
+      return r2
+    }
+  }
+  if n.wild != nil && n.wild.accepts(method) {
+    params[n.wild_name] = "/" + path_unescape(strings.join(segs[i:], "/"))
+    return n.wild
+  }
+  return nil
+}
+
+fn (n: *Node) route_for(method: str) -> *Route {
+  if r, ok := n.routes[method]; ok { return r }
+  return n.routes["GET"]      # HEAD
+}
+
+# ---------------------------------------------------------------- groups and the engine
+
+# a set of routes under a path prefix that share middlewares
+export struct Group {
+  prefix: str
+  middlewares: []fn(*Context)
+  parent: *Group
+  engine: *Engine
+}
+
+export struct Engine {
+  Group
+  tree: *Node
+  no_route_handlers: []fn(*Context)
+  no_method_handlers: []fn(*Context)
+  # GET /users/ when only /users exists (or the reverse) redirects (301 for GET and HEAD, 307
+  # for the other methods), as in Gin
+  redirect_trailing_slash: bool
+  # a path that exists with other methods answers 405 with an Allow header (else 404)
+  handle_method_not_allowed: bool
+}
+
+# an engine without middlewares
+export fn new() -> *Engine { return create_engine() }
+
+fn create_engine() -> *Engine {
+  e := &Engine{tree: new_node(), redirect_trailing_slash: true, handle_method_not_allowed: true}
+  e.Group.engine = e
+  e.Group.prefix = "/"
+  return e
+}
+
+# an engine with logger() and recovery()
+export fn default_engine() -> *Engine {
+  e := create_engine()
+  e.use(logger())
+  e.use(recovery())
+  return e
+}
+
+fn join_paths(a: str, b: str) -> str {
+  if b == "" { return a }
+  out := strings.trim_suffix(a, "/") + "/" + strings.trim_prefix(b, "/")
+  return out
+}
+
+# adds a middleware to the group (on the engine: to every request, 404 and 405 included)
+export fn (g: *Group) use(mw: fn(*Context)) { g.middlewares = append(g.middlewares, mw) }
+
+# a group under prefix, inside this one
+export fn (g: *Group) group(prefix: str) -> *Group {
+  return &Group{prefix: join_paths(g.prefix, prefix), parent: g, engine: g.engine}
+}
+
+# registers handlers (middlewares of the route, then the handler) for a method and path
+export fn (g: *Group) route(method: str, path: str, handlers: []fn(*Context)) {
+  if len(handlers) == 0 { panic("web: route " + method + " " + path + " without handlers") }
+  full := join_paths(g.prefix, path)
+  if !strings.has_prefix(full, "/") { full = "/" + full }
+  g.engine.tree.insert(strings.to_upper(method), full, &Route{pattern: full, handlers: handlers, group: g})
+}
+
+export fn (g: *Group) handle(method: str, path: str, h: fn(*Context)) { g.route(method, path, []fn(*Context){h}) }
+export fn (g: *Group) get(path: str, h: fn(*Context)) { g.handle("GET", path, h) }
+export fn (g: *Group) post(path: str, h: fn(*Context)) { g.handle("POST", path, h) }
+export fn (g: *Group) put(path: str, h: fn(*Context)) { g.handle("PUT", path, h) }
+export fn (g: *Group) patch(path: str, h: fn(*Context)) { g.handle("PATCH", path, h) }
+export fn (g: *Group) delete(path: str, h: fn(*Context)) { g.handle("DELETE", path, h) }
+export fn (g: *Group) options(path: str, h: fn(*Context)) { g.handle("OPTIONS", path, h) }
+export fn (g: *Group) head(path: str, h: fn(*Context)) { g.handle("HEAD", path, h) }
+
+# the same handler for GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS
+export fn (g: *Group) any(path: str, h: fn(*Context)) {
+  for _, m := range []str{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"} { g.handle(m, path, h) }
+}
+
+# the handler for paths that match no route (default: 404 {"error": "not found"})
+export fn (e: *Engine) no_route(h: fn(*Context)) { e.no_route_handlers = []fn(*Context){h} }
+# the handler for paths that exist only with other methods (default: 405 {"error": "method not allowed"})
+export fn (e: *Engine) no_method(h: fn(*Context)) { e.no_method_handlers = []fn(*Context){h} }
+
+# the middlewares of g and its parents, outermost first
+fn chain_of(g: *Group, out: []fn(*Context)) -> []fn(*Context) {
+  if g == nil { return out }
+  out = chain_of(g.parent, out)
+  for _, h := range g.middlewares { out = append(out, h) }
+  return out
+}
+
+fn with_global(e: *Engine, hs: []fn(*Context)) -> []fn(*Context) {
+  out := []fn(*Context){}
+  for _, h := range e.Group.middlewares { out = append(out, h) }
+  for _, h2 := range hs { out = append(out, h2) }
+  return out
+}
+
+fn sort_strs(a: []str) {
+  for i := 1; i < len(a); i++ {
+    j := i
+    while j > 0 && a[j - 1] > a[j] {
+      t := a[j]
+      a[j] = a[j - 1]
+      a[j - 1] = t
+      j--
+    }
+  }
+}
+
+# answers one request (std/http calls this through run(); tests call it through test_request())
+export fn (e: *Engine) serve(req: *http.Request, res: *http.Response) {
+  c := &Context{request: req, response: res, params: map[str]str{}, keys: map[str]any{}, index: -1, engine: e}
+  segs := split_path(req.path)
+  n := e.tree.find(segs, 0, c.params, req.method)
+  if n != nil {
+    rt := n.route_for(req.method)
+    c.full = rt.pattern
+    hs := chain_of(rt.group, []fn(*Context){})
+    for _, h := range rt.handlers { hs = append(hs, h) }
+    c.handlers = hs
+    c.next()
+    return
+  }
+  c.params = map[str]str{}
+  if e.redirect_trailing_slash && req.path != "/" {
+    alt := req.path + "/"
+    if strings.has_suffix(req.path, "/") { alt = strings.trim_suffix(req.path, "/") }
+    if alt == "" { alt = "/" }
+    if e.tree.find(split_path(alt), 0, map[str]str{}, req.method) != nil {
+      code := 307
+      if req.method == "GET" || req.method == "HEAD" { code = 301 }
+      if req.query != "" { alt = alt + "?" + req.query }
+      c.redirect(code, alt)
+      return
+    }
+  }
+  if e.handle_method_not_allowed {
+    other := e.tree.find(segs, 0, map[str]str{}, "")
+    if other != nil {
+      allow := []str{}
+      for m, _ := range other.routes { allow = append(allow, m) }
+      if _, ok := other.routes["GET"]; ok {
+        if _, ok2 := other.routes["HEAD"]; !ok2 { allow = append(allow, "HEAD") }
+      }
+      sort_strs(allow)
+      c.set_header("Allow", strings.join(allow, ", "))
+      hs2 := e.no_method_handlers
+      if len(hs2) == 0 { hs2 = []fn(*Context){fn(c2: *Context) { c2.json(405, map[str]any{"error": "method not allowed"}) }} }
+      c.handlers = with_global(e, hs2)
+      c.next()
+      return
+    }
+  }
+  hs3 := e.no_route_handlers
+  if len(hs3) == 0 { hs3 = []fn(*Context){fn(c3: *Context) { c3.json(404, map[str]any{"error": "not found"}) }} }
+  c.handlers = with_global(e, hs3)
+  c.next()
+}
+
+# listens on addr ("host:port" or ":port"; "" is ":8080") and serves forever; returns only on error
+export fn (e: *Engine) run(addr: str) -> error {
+  if addr == "" { addr = ":8080" }
+  i := strings.last_index(addr, ":")
+  host := "0.0.0.0"
+  port_text := addr
+  if i >= 0 {
+    if i > 0 { host = addr[0:i] }
+    port_text = addr[i + 1:]
+  }
+  port, err := strconv.atoi(port_text)
+  if err != nil { return err }
+  http.handle("/", fn(req: *http.Request, res: *http.Response) { e.serve(req, res) })
+  shown := host
+  if shown == "0.0.0.0" { shown = "localhost" }
+  os.stdout("[WEB] listening on http://" + shown + ":" + str(port) + "\n")
+  return http.listen_and_serve(host, port)
+}
+
+# ---------------------------------------------------------------- testing without a network
+
+export struct TestResponse {
+  status: int
+  headers: map[str]str
+  body: str
+}
+
+# the header value (any case), or ""
+export fn (r: *TestResponse) header(name: str) -> str {
+  for k, v := range r.headers { if strings.to_lower(k) == strings.to_lower(name) { return v } }
+  return ""
+}
+
+# runs one request through the engine, without sockets: target is a path with an optional query
+export fn test_request(e: *Engine, method: str, target: str, body: str, headers: map[str]str) -> *TestResponse {
+  req := &http.Request{method: method, version: "HTTP/1.1", headers: map[str]str{}, body: body}
+  q := strings.index(target, "?")
+  if q >= 0 {
+    req.path = target[0:q]
+    req.query = target[q + 1:]
+  } else { req.path = target }
+  if headers != nil { for k, v := range headers { req.headers[strings.to_lower(k)] = v } }
+  res := &http.Response{status: 200, headers: map[str]str{}}
+  e.serve(req, res)
+  out := res.body.string()
+  if method == "HEAD" { out = "" }
+  return &TestResponse{status: res.status, headers: res.headers, body: out}
+}
+
+# ---------------------------------------------------------------- the context
+
+# one request on its way through the handlers
+export struct Context {
+  request: *http.Request
+  response: *http.Response
+  params: map[str]str
+  keys: map[str]any
+  handlers: []fn(*Context)
+  index: int
+  full: str
+  engine: *Engine
+  queries: map[str][]str
+  queries_ok: bool
+}
+
+# runs the next handlers of the chain (in a middleware: the rest of the request), then returns
+export fn (c: *Context) next() {
+  c.index++
+  while c.index < len(c.handlers) {
+    c.handlers[c.index](c)
+    c.index++
+  }
+}
+
+# stops the chain: the handlers after the current one do not run
+export fn (c: *Context) abort() { c.index = ABORT_INDEX }
+export fn (c: *Context) is_aborted() -> bool { return c.index >= ABORT_INDEX }
+export fn (c: *Context) abort_with_status(code: int) {
+  c.status(code)
+  c.abort()
+}
+export fn (c: *Context) abort_with_status_json(code: int, v: any) {
+  c.json(code, v)
+  c.abort()
+}
+
+# the value of a route parameter (":id" or "*path"), or ""
+export fn (c: *Context) param(name: str) -> str { return c.params[name] }
+
+fn (c: *Context) parse_query() {
+  if c.queries_ok { return }
+  c.queries_ok = true
+  c.queries = parse_query(c.request.query)
+}
+
+# the first value of a query parameter (?q=...), or ""
+export fn (c: *Context) query(key: str) -> str {
+  v, _ := c.get_query(key)
+  return v
+}
+export fn (c: *Context) default_query(key: str, def: str) -> str {
+  v, ok := c.get_query(key)
+  if !ok { return def }
+  return v
+}
+export fn (c: *Context) get_query(key: str) -> (str, bool) {
+  c.parse_query()
+  vs, ok := c.queries[key]
+  if !ok || len(vs) == 0 { return "", false }
+  return vs[0], true
+}
+# every value of a query parameter (?tag=a&tag=b)
+export fn (c: *Context) query_array(key: str) -> []str {
+  c.parse_query()
+  vs, ok := c.queries[key]
+  if !ok { return []str{} }
+  return vs
+}
+
+export fn (c: *Context) header(name: str) -> str { return c.request.header(name) }
+export fn (c: *Context) method() -> str { return c.request.method }
+export fn (c: *Context) path() -> str { return c.request.path }
+# the pattern of the matched route ("/users/:id"), or "" outside a route (404, 405)
+export fn (c: *Context) full_path() -> str { return c.full }
+export fn (c: *Context) body() -> str { return c.request.body }
+
+# the client address from X-Forwarded-For or X-Real-Ip ("" without them: std/http does not
+# expose the address of the connection yet)
+export fn (c: *Context) client_ip() -> str {
+  f := c.header("X-Forwarded-For")
+  if f != "" {
+    comma := strings.index(f, ",")
+    if comma >= 0 { f = f[0:comma] }
+    return strings.trim_space(f)
+  }
+  return strings.trim_space(c.header("X-Real-Ip"))
+}
+
+# per-request values shared between middlewares and handlers
+export fn (c: *Context) set(key: str, v: any) { c.keys[key] = v }
+export fn (c: *Context) get(key: str) -> (any, bool) {
+  v, ok := c.keys[key]
+  return v, ok
+}
+export fn (c: *Context) must_get(key: str) -> any {
+  v, ok := c.keys[key]
+  if !ok { panic("web: key \"" + key + "\" does not exist") }
+  return v
+}
+
+# decodes the JSON body into p (a pointer); on an error answers 400 {"error": ...} and aborts
+export fn (c: *Context) bind(p: any) -> error {
+  err := c.should_bind_json(p)
+  if err != nil { c.abort_with_status_json(400, map[str]any{"error": err.Error()}) }
+  return err
+}
+
+# decodes the JSON body into p (a pointer); the handler decides what to do with an error
+export fn (c: *Context) should_bind_json(p: any) -> error {
+  if strings.trim_space(c.request.body) == "" { return json_error("empty request body") }
+  return json.unmarshal(c.request.body, p)
+}
+
+struct BindError { msg: str }
+fn (e: *BindError) Error() -> str { return e.msg }
+fn json_error(msg: str) -> error { return &BindError{msg: msg} }
+
+# ---------------------------------------------------------------- writing the response
+
+export fn (c: *Context) status(code: int) { c.response.status = code }
+export fn (c: *Context) set_header(name: str, value: str) { c.response.headers[name] = value }
+
+export fn (c: *Context) string(code: int, text: str) {
+  c.status(code)
+  if _, ok := c.response.headers["Content-Type"]; !ok { c.set_header("Content-Type", "text/plain; charset=utf-8") }
+  c.response.write(text)
+}
+
+export fn (c: *Context) data(code: int, content_type: str, body: str) {
+  c.status(code)
+  c.set_header("Content-Type", content_type)
+  c.response.write(body)
+}
+
+# v as JSON (maps, lists, structs, numbers, text...); 500 if it cannot be encoded
+export fn (c: *Context) json(code: int, v: any) {
+  s, err := json.marshal(v)
+  if err != nil {
+    c.string(500, "web: cannot encode the response as JSON: " + err.Error())
+    return
+  }
+  c.data(code, "application/json; charset=utf-8", s)
+}
+
+export fn (c: *Context) indented_json(code: int, v: any) {
+  s, err := json.marshal_indent(v, "  ")
+  if err != nil {
+    c.string(500, "web: cannot encode the response as JSON: " + err.Error())
+    return
+  }
+  c.data(code, "application/json; charset=utf-8", s)
+}
+
+export fn (c: *Context) redirect(code: int, location: str) {
+  c.status(code)
+  c.set_header("Location", location)
+}
+
+# ---------------------------------------------------------------- middlewares
+
+fn duration_text(ns: int) -> str {
+  if ns < 1000 { return str(ns) + "ns" }
+  if ns < 1000000 {
+    us := ns / 1000
+    return str(us) + "." + str(ns % 1000 / 100) + "µs"
+  }
+  ms := ns / 1000000
+  frac := ns % 1000000 / 1000
+  f := str(frac)
+  while len(f) < 3 { f = "0" + f }
+  return str(ms) + "." + f + "ms"
+}
+
+fn pad_left(s: str, n: int) -> str {
+  while len(s) < n { s = " " + s }
+  return s
+}
+
+# one line per request on the standard output: status, duration, client, method and path
+export fn logger() -> fn(*Context) { return logger_to(fn(line: str) { os.stdout(line + "\n") }) }
+
+# like logger(), writing each line with out
+export fn logger_to(out: fn(str)) -> fn(*Context) {
+  return fn(c: *Context) {
+    start := os.nanotime()
+    c.next()
+    d := os.nanotime() - start
+    ip := c.client_ip()
+    if ip == "" { ip = "-" }
+    target := c.request.path
+    if c.request.query != "" { target = target + "?" + c.request.query }
+    out("[WEB] " + str(c.response.status) + " | " + pad_left(duration_text(d), 10) + " | " + ip + " | " + pad_left(c.request.method, 7) + " \"" + target + "\"")
+  }
+}
+
+fn panic_text(r: any) -> str {
+  if s, ok := r.(str); ok { return s }
+  if e, ok2 := r.(error); ok2 { return e.Error() }
+  return "panic"
+}
+
+# turns a panic in a later handler into 500 {"error": "internal server error"} (the message goes
+# to the standard error output) instead of ending the server
+export fn recovery() -> fn(*Context) {
+  return fn(c: *Context) {
+    defer fn() {
+      r := recover()
+      if r != nil {
+        os.eprintln("[WEB] panic recovered in " + c.request.method + " " + c.request.path + ": " + panic_text(r))
+        c.response.body = strings.Builder{}
+        c.response.headers = map[str]str{}
+        c.abort_with_status_json(500, map[str]any{"error": "internal server error"})
+      }
+    }()
+    c.next()
+  }
+}
+
+# CORS headers for the given origin ("*" for any); answers OPTIONS preflight requests with 204
+export fn cors(origin: str) -> fn(*Context) {
+  return fn(c: *Context) {
+    c.set_header("Access-Control-Allow-Origin", origin)
+    c.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
+    c.set_header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization")
+    if c.request.method == "OPTIONS" {
+      c.abort_with_status(204)
+      return
+    }
+    c.next()
+  }
+}
+
+# HTTP basic authentication against user -> password; stores the user under the key "user"
+export fn basic_auth(accounts: map[str]str) -> fn(*Context) {
+  return fn(c: *Context) {
+    h := c.header("Authorization")
+    if strings.has_prefix(h, "Basic ") {
+      raw, err := base64.decode(strings.trim_space(h[6:]))
+      if err == nil {
+        colon := strings.index(raw, ":")
+        if colon >= 0 {
+          pw, ok := accounts[raw[0:colon]]
+          if ok && pw == raw[colon + 1:] {
+            c.set("user", raw[0:colon])
+            c.next()
+            return
+          }
+        }
+      }
+    }
+    c.set_header("WWW-Authenticate", "Basic realm=\"Authorization Required\"")
+    c.abort_with_status_json(401, map[str]any{"error": "unauthorized"})
+  }
+}
+
+# ---------------------------------------------------------------- URL decoding
+
+fn hex_val(b: int) -> int {
+  if b >= 48 && b <= 57 { return b - 48 }
+  if b >= 97 && b <= 102 { return b - 87 }
+  if b >= 65 && b <= 70 { return b - 55 }
+  return -1
+}
+
+fn unescape(s: str, plus: bool) -> str {
+  if strings.index(s, "%") < 0 && (!plus || strings.index(s, "+") < 0) { return s }
+  out := strings.Builder{}
+  i := 0
+  while i < len(s) {
+    b := int(s[i])
+    if b == 37 && i + 2 < len(s) && hex_val(int(s[i + 1])) >= 0 && hex_val(int(s[i + 2])) >= 0 {
+      out.write_byte(hex_val(int(s[i + 1])) * 16 + hex_val(int(s[i + 2])))
+      i += 3
+    } else if b == 43 && plus {
+      out.write_byte(32)
+      i++
+    } else {
+      out.write_byte(int(s[i]))
+      i++
+    }
+  }
+  return out.string()
+}
+
+fn path_unescape(s: str) -> str { return unescape(s, false) }
+export fn query_unescape(s: str) -> str { return unescape(s, true) }
+
+# "a=1&b=x%20y&a=2" -> {"a": ["1", "2"], "b": ["x y"]}
+export fn parse_query(q: str) -> map[str][]str {
+  out := map[str][]str{}
+  if q == "" { return out }
+  for _, part := range strings.split(q, "&") {
+    if part == "" { continue }
+    k := part
+    v := ""
+    eq := strings.index(part, "=")
+    if eq >= 0 {
+      k = part[0:eq]
+      v = part[eq + 1:]
+    }
+    k = query_unescape(k)
+    out[k] = append(out[k], query_unescape(v))
+  }
+  return out
+}

@@ -1,0 +1,62 @@
+import { describe, it, expect } from "std/testing"
+import "web"
+
+struct User {
+  name: str
+  age: int
+}
+
+fn app() -> *web.Engine {
+  r := web.new()
+  r.post("/users", fn(c: *web.Context) {
+    u := &User{}
+    if c.bind(u) != nil { return }
+    c.json(201, *u)
+  })
+  r.post("/check", fn(c: *web.Context) {
+    u := &User{}
+    err := c.should_bind_json(u)
+    if err != nil {
+      c.string(422, "invalid")
+      return
+    }
+    c.string(200, u.name)
+  })
+  r.get("/list", fn(c: *web.Context) { c.json(200, []int{1, 2, 3}) })
+  r.get("/map", fn(c: *web.Context) { c.json(200, map[str]any{"ok": true, "n": 2, "s": "x"}) })
+  r.get("/pretty", fn(c: *web.Context) { c.indented_json(200, map[str]any{"a": 1}) })
+  r.get("/stop", fn(c: *web.Context) { c.abort_with_status_json(418, map[str]any{"error": "teapot"}) })
+  return r
+}
+
+describe("JSON", fn() {
+  it("binds a valid body into a struct and answers it back", fn() {
+    res := web.test_request(app(), "POST", "/users", "{\"name\": \"Ana\", \"age\": 30}", nil)
+    expect(res.status).to_equal(201)
+    expect(res.body).to_equal("{\"name\":\"Ana\",\"age\":30}")
+    expect(res.header("Content-Type")).to_equal("application/json; charset=utf-8")
+  })
+  it("answers 400 with the error for an invalid body in bind()", fn() {
+    res := web.test_request(app(), "POST", "/users", "{\"name\": ", nil)
+    expect(res.status).to_equal(400)
+    expect(res.body).to_start_with("{\"error\":")
+    empty := web.test_request(app(), "POST", "/users", "", nil)
+    expect(empty.status).to_equal(400)
+    expect(empty.body).to_equal("{\"error\":\"empty request body\"}")
+  })
+  it("leaves the answer to the handler in should_bind_json()", fn() {
+    expect(web.test_request(app(), "POST", "/check", "[1", nil).status).to_equal(422)
+    expect(web.test_request(app(), "POST", "/check", "{\"name\":\"Bia\"}", nil).body).to_equal("Bia")
+  })
+  it("encodes lists, maps and indented JSON", fn() {
+    r := app()
+    expect(web.test_request(r, "GET", "/list", "", nil).body).to_equal("[1,2,3]")
+    expect(web.test_request(r, "GET", "/map", "", nil).body).to_equal("{\"n\":2,\"ok\":true,\"s\":\"x\"}")
+    expect(web.test_request(r, "GET", "/pretty", "", nil).body).to_equal("{\n  \"a\": 1\n}")
+  })
+  it("aborts with a JSON answer", fn() {
+    res := web.test_request(app(), "GET", "/stop", "", nil)
+    expect(res.status).to_equal(418)
+    expect(res.body).to_equal("{\"error\":\"teapot\"}")
+  })
+})

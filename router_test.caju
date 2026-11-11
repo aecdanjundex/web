@@ -1,0 +1,136 @@
+import { describe, it, expect } from "std/testing"
+import "web"
+
+fn text(s: str) -> fn(*web.Context) {
+  return fn(c: *web.Context) { c.string(200, s) }
+}
+fn get(r: *web.Engine, target: str) -> *web.TestResponse { return web.test_request(r, "GET", target, "", nil) }
+
+describe("routes", fn() {
+  it("match static paths", fn() {
+    r := web.new()
+    r.get("/", text("root"))
+    r.get("/users", text("users"))
+    r.get("/users/new", text("new"))
+    expect(get(r, "/").body).to_equal("root")
+    expect(get(r, "/users").body).to_equal("users")
+    expect(get(r, "/users/new").body).to_equal("new")
+  })
+  it("capture :params and decode them", fn() {
+    r := web.new()
+    r.get("/users/:id/posts/:post", fn(c: *web.Context) { c.string(200, c.param("id") + "|" + c.param("post")) })
+    expect(get(r, "/users/42/posts/a%20b").body).to_equal("42|a b")
+  })
+  it("capture the rest of the path with *catch-all, with a leading slash", fn() {
+    r := web.new()
+    r.get("/files/*path", fn(c: *web.Context) { c.string(200, c.param("path")) })
+    expect(get(r, "/files/a/b/c.txt").body).to_equal("/a/b/c.txt")
+    expect(get(r, "/files/").body).to_equal("/")
+  })
+  it("prefer static over :param over *catch-all", fn() {
+    r := web.new()
+    r.get("/u/new", text("static"))
+    r.get("/u/:id", text("param"))
+    r.get("/u/*rest", text("catch-all"))
+    expect(get(r, "/u/new").body).to_equal("static")
+    expect(get(r, "/u/7").body).to_equal("param")
+    expect(get(r, "/u/7/x").body).to_equal("catch-all")
+  })
+  it("fall back to a :param route when the static one has another method", fn() {
+    r := web.new()
+    r.post("/u/new", text("post new"))
+    r.get("/u/:id", text("get id"))
+    expect(get(r, "/u/new").body).to_equal("get id")
+    expect(web.test_request(r, "POST", "/u/new", "", nil).body).to_equal("post new")
+  })
+  it("answer 404 with JSON when nothing matches", fn() {
+    r := web.new()
+    r.get("/a", text("a"))
+    res := get(r, "/b")
+    expect(res.status).to_equal(404)
+    expect(res.body).to_equal("{\"error\":\"not found\"}")
+    expect(res.header("content-type")).to_equal("application/json; charset=utf-8")
+  })
+  it("answer 405 with Allow when the path exists with other methods", fn() {
+    r := web.new()
+    r.get("/items", text("list"))
+    r.post("/items", text("create"))
+    res := web.test_request(r, "DELETE", "/items", "", nil)
+    expect(res.status).to_equal(405)
+    expect(res.header("Allow")).to_equal("GET, HEAD, POST")
+    expect(res.body).to_equal("{\"error\":\"method not allowed\"}")
+  })
+  it("use custom 404 and 405 handlers", fn() {
+    r := web.new()
+    r.get("/a", text("a"))
+    r.no_route(fn(c: *web.Context) { c.string(404, "nothing at " + c.path()) })
+    r.no_method(fn(c: *web.Context) { c.string(405, "no") })
+    expect(get(r, "/zzz").body).to_equal("nothing at /zzz")
+    expect(web.test_request(r, "PUT", "/a", "", nil).body).to_equal("no")
+  })
+  it("answer HEAD with the GET route and no body", fn() {
+    r := web.new()
+    r.get("/a", text("body"))
+    res := web.test_request(r, "HEAD", "/a", "", nil)
+    expect(res.status).to_equal(200)
+    expect(res.body).to_equal("")
+  })
+  it("redirect a trailing slash like Gin (301 for GET, 307 otherwise)", fn() {
+    r := web.new()
+    r.get("/users", text("users"))
+    r.post("/dirs/", text("dirs"))
+    res := get(r, "/users/?page=2")
+    expect(res.status).to_equal(301)
+    expect(res.header("Location")).to_equal("/users?page=2")
+    res2 := web.test_request(r, "POST", "/dirs", "", nil)
+    expect(res2.status).to_equal(307)
+    expect(res2.header("Location")).to_equal("/dirs/")
+  })
+  it("do not redirect when redirect_trailing_slash is off", fn() {
+    r := web.new()
+    r.redirect_trailing_slash = false
+    r.get("/users", text("users"))
+    expect(get(r, "/users/").status).to_equal(404)
+  })
+  it("register a handler for every method with any()", fn() {
+    r := web.new()
+    r.any("/x", fn(c: *web.Context) { c.string(200, c.method()) })
+    expect(web.test_request(r, "PATCH", "/x", "", nil).body).to_equal("PATCH")
+    expect(web.test_request(r, "DELETE", "/x", "", nil).body).to_equal("DELETE")
+  })
+  it("report the route pattern in full_path()", fn() {
+    r := web.new()
+    r.get("/users/:id", fn(c: *web.Context) { c.string(200, c.full_path()) })
+    expect(get(r, "/users/3").body).to_equal("/users/:id")
+  })
+  it("refuse conflicting parameter names and duplicate routes", fn() {
+    r := web.new()
+    r.get("/a/:id", text("a"))
+    expect(fn() { r.get("/a/:name/x", text("b")) }).to_panic()
+    expect(fn() { r.get("/a/:id", text("c")) }).to_panic()
+    expect(fn() { r.get("/f/*p/x", text("d")) }).to_panic()
+  })
+})
+
+describe("groups", fn() {
+  it("prefix their routes, nested", fn() {
+    r := web.new()
+    api := r.group("/api")
+    v1 := api.group("v1")
+    v1.get("/users/:id", fn(c: *web.Context) { c.string(200, "v1 " + c.param("id")) })
+    api.get("/ping", text("pong"))
+    expect(get(r, "/api/v1/users/9").body).to_equal("v1 9")
+    expect(get(r, "/api/ping").body).to_equal("pong")
+    expect(get(r, "/v1/users/9").status).to_equal(404)
+  })
+  it("run their middlewares only on their routes", fn() {
+    r := web.new()
+    admin := r.group("/admin")
+    admin.use(fn(c: *web.Context) { c.abort_with_status(401) })
+    admin.get("/stats", text("secret"))
+    r.get("/public", text("hello"))
+    expect(get(r, "/admin/stats").status).to_equal(401)
+    expect(get(r, "/admin/stats").body).to_equal("")
+    expect(get(r, "/public").body).to_equal("hello")
+  })
+})
