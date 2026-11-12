@@ -1,8 +1,8 @@
 # web
 
-Um mini framework web para [Caju](https://github.com/aecdanjundex/cajulang), no estilo do
-[Gin](https://gin-gonic.com) do Go, para criar APIs REST: rotas com parâmetros, grupos,
-middlewares, JSON de entrada e saída e testes sem rede.
+A mini web framework for [Caju](https://github.com/aecdanjundex/cajulang), in the style of Go's
+[Gin](https://gin-gonic.com), for building REST APIs: routes with parameters, groups, middleware,
+JSON input and output, and tests without a network.
 
 ```caju
 import "github.com/aecdanjundex/web"
@@ -12,7 +12,7 @@ struct User {
   age: int
 }
 
-r := web.default_engine()        # já vem com logger() e recovery()
+r := web.default_engine()        # comes with logger() and recovery()
 
 r.get("/users/:id", fn(c: *web.Context) {
   c.json(200, map[str]any{"id": c.param("id"), "page": c.default_query("page", "1")})
@@ -20,7 +20,7 @@ r.get("/users/:id", fn(c: *web.Context) {
 
 r.post("/users", fn(c: *web.Context) {
   u := &User{}
-  if c.bind(u) != nil { return }   # JSON inválido: já respondeu 400 {"error": ...}
+  if c.bind(u) != nil { return }   # invalid JSON: already responded 400 {"error": ...}
   c.json(201, *u)
 })
 
@@ -31,91 +31,91 @@ api.get("/stats", fn(c: *web.Context) { c.json(200, map[str]any{"user": c.must_g
 r.run(":8080")
 ```
 
-## Instalação
+## Installation
 
-Precisa da Caju 0.3.0 ou mais nova (std/json e o servidor HTTP com keep-alive).
+Requires Caju 0.3.0 or newer (std/json and the HTTP server with keep-alive).
 
 ```sh
-caju pkg init                          # se o projeto ainda não tem caju.toml
+caju pkg init                          # if the project has no caju.toml yet
 caju pkg add github.com/aecdanjundex/web
 caju run main.caju
 ```
 
-Exemplo completo, uma API de tarefas (CRUD em memória): [`examples/todo_api.caju`](examples/todo_api.caju).
+Full example, a to-do API (in-memory CRUD): [`examples/todo_api.caju`](examples/todo_api.caju).
 
 ## API
 
-### Engine e grupos
+### Engine and groups
 
 | | |
 |---|---|
-| `web.new()` | engine sem middlewares |
-| `web.default_engine()` | engine com `web.logger()` e `web.recovery()` (o `gin.Default()`; `default` é palavra reservada na Caju) |
-| `r.get/post/put/patch/delete/options/head(path, h)` | registra uma rota; `h` é `fn(c: *web.Context)` |
-| `r.any(path, h)` | o mesmo handler para todos os métodos |
-| `r.handle(method, path, h)` | método qualquer |
-| `r.route(method, path, []fn(*web.Context){mw1, mw2, h})` | rota com middlewares próprios (a Caju não tem parâmetros variádicos) |
-| `r.use(mw)` | middleware de todas as requisições (inclusive 404 e 405) |
-| `g := r.group("/api")`, `g.group("/v1")`, `g.use(mw)` | grupos aninhados, com os mesmos métodos de rota |
-| `r.no_route(h)`, `r.no_method(h)` | handlers de 404 e 405 |
-| `r.redirect_trailing_slash`, `r.handle_method_not_allowed` | opções (ambas `true` por padrão) |
-| `r.run(":8080")` / `r.run("127.0.0.1:8080")` | serve para sempre num processo; devolve `error` só se falhar |
-| `r.run_workers(":8080", n)` | o mesmo em `n` processos que dividem a porta (`n <= 0`: um por CPU); **cada processo tem sua própria memória** |
-| `r.serve(req, res)` | atende um `*http.Request` do `std/http` |
-| `web.test_request(r, method, target, body, headers)` | roda uma requisição sem rede e devolve `*web.TestResponse` (`status`, `headers`, `body`, `header(name)`) |
+| `web.new()` | engine with no middleware |
+| `web.default_engine()` | engine with `web.logger()` and `web.recovery()` (the `gin.Default()`; `default` is a reserved word in Caju) |
+| `r.get/post/put/patch/delete/options/head(path, h)` | registers a route; `h` is `fn(c: *web.Context)` |
+| `r.any(path, h)` | the same handler for every method |
+| `r.handle(method, path, h)` | any method |
+| `r.route(method, path, []fn(*web.Context){mw1, mw2, h})` | a route with its own middleware (Caju has no variadic parameters) |
+| `r.use(mw)` | middleware for every request (including 404 and 405) |
+| `g := r.group("/api")`, `g.group("/v1")`, `g.use(mw)` | nested groups, with the same route methods |
+| `r.no_route(h)`, `r.no_method(h)` | 404 and 405 handlers |
+| `r.redirect_trailing_slash`, `r.handle_method_not_allowed` | options (both `true` by default) |
+| `r.run(":8080")` / `r.run("127.0.0.1:8080")` | serves forever in one process; returns an `error` only on failure |
+| `r.run_workers(":8080", n)` | the same in `n` processes sharing the port (`n <= 0`: one per CPU); **each process has its own memory** |
+| `r.serve(req, res)` | handles an `*http.Request` from `std/http` |
+| `web.test_request(r, method, target, body, headers)` | runs a request without a network and returns a `*web.TestResponse` (`status`, `headers`, `body`, `header(name)`) |
 
-**Rotas:** `/users/:id` captura um segmento e `/files/*path` captura o resto (com a barra inicial,
-como no Gin: `/files/a/b` → `"/a/b"`). Segmentos fixos têm prioridade sobre `:param`, que tem
-prioridade sobre `*catch-all`. Se a rota fixa só existe com outro método, a de `:param` atende. Os
-valores vêm decodificados (`%20` → espaço).
+**Routes:** `/users/:id` captures one segment and `/files/*path` captures the rest (with the leading
+slash, as in Gin: `/files/a/b` → `"/a/b"`). Static segments take precedence over `:param`, which
+takes precedence over `*catch-all`. If the static route only exists with another method, the
+`:param` route handles the request. Values come decoded (`%20` → space).
 
-**Respostas automáticas:**
-- Nenhuma rota: 404 `{"error":"not found"}`.
-- O caminho existe com outros métodos: 405 `{"error":"method not allowed"}` com o cabeçalho `Allow`.
-- Barra final: como no Gin, `/users/` redireciona para `/users` (e o contrário). O código é 301
-  em GET e HEAD e 307 nos outros métodos, e a query é mantida.
-- `HEAD` usa a rota `GET`, sem corpo.
+**Automatic responses:**
+- No route: 404 `{"error":"not found"}`.
+- The path exists with other methods: 405 `{"error":"method not allowed"}` with the `Allow` header.
+- Trailing slash: as in Gin, `/users/` redirects to `/users` (and vice versa). The code is 301 for
+  GET and HEAD and 307 for other methods, and the query is kept.
+- `HEAD` uses the `GET` route, without a body.
 
-**Ordem dos middlewares:** os do engine (`r.use`), depois os de cada grupo, do mais externo para o
-mais interno, depois os da rota (`r.route`). Diferente do Gin, um `use()` feito depois de registrar
-a rota também vale para ela.
+**Middleware order:** the engine's (`r.use`), then each group's, from the outermost to the
+innermost, then the route's (`r.route`). Unlike Gin, a `use()` called after a route is registered
+also applies to that route.
 
 ### Context
 
-| requisição | |
+| request | |
 |---|---|
-| `c.param("id")` | parâmetro da rota |
-| `c.query("q")`, `c.default_query("page", "1")`, `c.get_query("q")` → `(str, bool)`, `c.query_array("tag")` | query string, decodificada |
-| `c.header("X-Token")`, `c.method()`, `c.path()`, `c.full_path()` (o padrão: `/users/:id`), `c.body()` | |
-| `c.client_ip()` | de `X-Forwarded-For`, `X-Real-Ip` ou, sem eles, o endereço da conexão |
-| `c.bind(&v)` | lê o corpo JSON em `v`; com erro, responde 400 `{"error": ...}`, aborta e devolve o erro |
-| `c.should_bind_json(&v)` | o mesmo sem responder: o handler decide |
+| `c.param("id")` | route parameter |
+| `c.query("q")`, `c.default_query("page", "1")`, `c.get_query("q")` → `(str, bool)`, `c.query_array("tag")` | query string, decoded |
+| `c.header("X-Token")`, `c.method()`, `c.path()`, `c.full_path()` (the pattern: `/users/:id`), `c.body()` | |
+| `c.client_ip()` | from `X-Forwarded-For`, `X-Real-Ip` or, without them, the connection address |
+| `c.bind(&v)` | reads the JSON body into `v`; on error, responds 400 `{"error": ...}`, aborts and returns the error |
+| `c.should_bind_json(&v)` | the same without responding: the handler decides |
 
-| resposta | |
+| response | |
 |---|---|
-| `c.json(code, v)`, `c.indented_json(code, v)` | qualquer valor: mapas, listas, structs, números, texto |
+| `c.json(code, v)`, `c.indented_json(code, v)` | any value: maps, lists, structs, numbers, text |
 | `c.string(code, text)`, `c.data(code, content_type, body)` | |
 | `c.status(code)`, `c.set_header(name, value)`, `c.redirect(code, url)` | |
 
-| fluxo | |
+| flow | |
 |---|---|
-| `c.next()` | roda o resto da cadeia e volta (para medir, envolver, pós-processar) |
-| `c.abort()`, `c.abort_with_status(code)`, `c.abort_with_status_json(code, v)`, `c.is_aborted()` | interrompe a cadeia |
-| `c.set(key, v)`, `c.get(key)` → `(any, bool)`, `c.must_get(key)` | valores da requisição entre middlewares |
+| `c.next()` | runs the rest of the chain and comes back (to measure, wrap, post-process) |
+| `c.abort()`, `c.abort_with_status(code)`, `c.abort_with_status_json(code, v)`, `c.is_aborted()` | stops the chain |
+| `c.set(key, v)`, `c.get(key)` → `(any, bool)`, `c.must_get(key)` | per-request values shared between middleware |
 
-Não existe `gin.H`, porque a Caju não tem alias de tipo. Use `map[str]any{"chave": valor}`.
+There is no `gin.H`, because Caju has no type aliases. Use `map[str]any{"chave": valor}`.
 
-### Middlewares prontos
+### Built-in middleware
 
 | | |
 |---|---|
-| `web.logger()` | uma linha por requisição: `[WEB] 200 \|   153.2µs \| - \|     GET "/users/1"` |
-| `web.logger_to(fn(line: str) {...})` | o mesmo, escrevendo onde você quiser |
-| `web.recovery()` | um `panic` vira 500 `{"error":"internal server error"}` (a mensagem vai para o stderr) e o servidor continua |
-| `web.cors("*")` | cabeçalhos CORS; responde 204 às requisições `OPTIONS` (preflight) |
-| `web.basic_auth(map[str]str{"user": "senha"})` | autenticação HTTP básica; guarda o usuário em `c.get("user")` |
+| `web.logger()` | one line per request: `[WEB] 200 \|   153.2µs \| - \|     GET "/users/1"` |
+| `web.logger_to(fn(line: str) {...})` | the same, writing wherever you want |
+| `web.recovery()` | a `panic` becomes 500 `{"error":"internal server error"}` (the message goes to stderr) and the server keeps running |
+| `web.cors("*")` | CORS headers; responds 204 to `OPTIONS` (preflight) requests |
+| `web.basic_auth(map[str]str{"user": "senha"})` | HTTP basic authentication; stores the user in `c.get("user")` |
 
-## Testes
+## Tests
 
 ```caju
 import { describe, it, expect } from "std/testing"
@@ -130,20 +130,20 @@ describe("GET /users/:id", fn() {
 })
 ```
 
-Para rodar os testes do próprio pacote: `caju test`.
+To run the package's own tests: `caju test`.
 
-## Diferenças em relação ao Gin
+## Differences from Gin
 
-- O servidor do `std/http` é um laço de eventos (epoll) num processo: mantém muitas conexões
-  abertas ao mesmo tempo, com keep-alive e pipelining, mas **roda um handler por vez** (não há
-  goroutines). Um handler lento segura os outros clientes daquele processo.
-- Para usar vários núcleos, `r.run_workers(addr, n)` sobe `n` processos na mesma porta
-  (`SO_REUSEPORT`). Eles **não compartilham memória**: um mapa global alterado por um handler
-  existe separado em cada processo. Use com handlers sem estado ou com o estado fora do processo.
-- Sem parâmetros variádicos: middlewares de rota vão numa lista, em `r.route(...)`.
-- `web.default_engine()` no lugar de `Default()`, e `map[str]any` no lugar de `gin.H`.
-- Sem templates HTML, upload multipart, formulários (`c.post_form`), arquivos estáticos nem HTTPS.
+- The `std/http` server is an event loop (epoll) in one process: it keeps many connections open at
+  once, with keep-alive and pipelining, but **runs one handler at a time** (there are no
+  goroutines). A slow handler holds up the other clients of that process.
+- To use several cores, `r.run_workers(addr, n)` starts `n` processes on the same port
+  (`SO_REUSEPORT`). They **do not share memory**: a global map changed by a handler exists
+  separately in each process. Use it with stateless handlers or with state kept outside the process.
+- No variadic parameters: route middleware goes in a list, in `r.route(...)`.
+- `web.default_engine()` instead of `Default()`, and `map[str]any` instead of `gin.H`.
+- No HTML templates, multipart uploads, forms (`c.post_form`), static files or HTTPS.
 
-## Licença
+## License
 
 MIT
