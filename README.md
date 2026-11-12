@@ -1,6 +1,6 @@
 # web
 
-Um mini framework web para [Caju](https://github.com/aecdanjundex/caju), no estilo do
+Um mini framework web para [Caju](https://github.com/aecdanjundex/cajulang), no estilo do
 [Gin](https://gin-gonic.com) do Go, para criar APIs REST: rotas com parâmetros, grupos,
 middlewares, JSON de entrada e saída e testes sem rede.
 
