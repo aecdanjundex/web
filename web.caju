@@ -1,6 +1,6 @@
 # web: a small Gin-style web framework for Caju, on top of std/http.
 #
-#   import "github.com/aecdanjundex/web"
+#   import "github.com/cajulang/web"
 #
 #   r := web.default_engine()            # with web.logger() and web.recovery()
 #   r.get("/users/:id", fn(c: *web.Context) {

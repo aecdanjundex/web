@@ -8,8 +8,8 @@
 #   curl -X PUT localhost:8080/todos/1 -d '{"title": "buy milk", "done": true}'
 #   curl -X DELETE localhost:8080/todos/1
 #
-# In a project that installed the package (caju pkg add github.com/aecdanjundex/web), import it
-# as "github.com/aecdanjundex/web"; this example imports the copy next to it.
+# In a project that installed the package (caju pkg add github.com/cajulang/web), import it
+# as "github.com/cajulang/web"; this example imports the copy next to it.
 import "../web"
 import "std/os"
 import "std/strconv"

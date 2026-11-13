@@ -1,11 +1,11 @@
 # web
 
-A mini web framework for [Caju](https://github.com/aecdanjundex/cajulang), in the style of Go's
+A mini web framework for [Caju](https://github.com/cajulang/cajulang), in the style of Go's
 [Gin](https://gin-gonic.com), for building REST APIs: routes with parameters, groups, middleware,
 JSON input and output, and tests without a network.
 
 ```caju
-import "github.com/aecdanjundex/web"
+import "github.com/cajulang/web"
 
 struct User {
   name: str
@@ -37,7 +37,7 @@ Requires Caju 0.3.0 or newer (std/json and the HTTP server with keep-alive).
 
 ```sh
 caju pkg init                          # if the project has no caju.toml yet
-caju pkg add github.com/aecdanjundex/web
+caju pkg add github.com/cajulang/web
 caju run main.caju
 ```
 
@@ -119,7 +119,7 @@ There is no `gin.H`, because Caju has no type aliases. Use `map[str]any{"chave":
 
 ```caju
 import { describe, it, expect } from "std/testing"
-import "github.com/aecdanjundex/web"
+import "github.com/cajulang/web"
 
 describe("GET /users/:id", fn() {
   it("devolve o id", fn() {

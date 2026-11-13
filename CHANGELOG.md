@@ -7,8 +7,12 @@ its version here.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-13
+
 ### Changed
-- Links point to the language repository at github.com/aecdanjundex/cajulang.
+- The package moved to the cajulang organization: its name is now `github.com/cajulang/web`
+  (`import "github.com/cajulang/web"`, `caju pkg add github.com/cajulang/web`).
+- Links point to the language repository at github.com/cajulang/cajulang.
 
 ## [0.2.0] - 2026-11-11
 
@@ -30,6 +34,7 @@ its version here.
   with `param`, `query`, `bind` (JSON), `json` and `set`/`get`, `no_route`, `default_engine()` with
   logging and recovery, and `test_request` for tests without a server.
 
-[Unreleased]: https://github.com/aecdanjundex/web/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/aecdanjundex/web/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/aecdanjundex/web/releases/tag/v0.1.0
+[Unreleased]: https://github.com/cajulang/web/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/cajulang/web/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/cajulang/web/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/cajulang/web/releases/tag/v0.1.0
